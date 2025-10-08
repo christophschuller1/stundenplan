@@ -47,21 +47,43 @@ def login_and_download_xlsx():
         clicked = False
         try:
             page.get_by_role("link", name=re.compile(r"Semesterpl[aä]ne", re.I)).click(timeout=4000)
-            page.wait_for_load_state("domcontentloaded"); clicked = True
+            page.wait_for_load_state("domcontentloaded")
+            clicked = True
         except Exception:
             pass
         if not clicked:
             try:
                 page.get_by_role("link", name=re.compile(r"LV[- ]?Plan", re.I)).click(timeout=4000)
-                page.wait_for_load_state("domcontentloaded"); clicked = True
+                page.wait_for_load_state("domcontentloaded")
+                clicked = True
             except Exception:
                 pass
 
-        # 3) Bereich „Semesterpläne Archiv“ – Dropdowns + Button
+        # 3) Inhalts-Frame finden (darin liegen die Dropdowns & Buttons)
         try:
-            ctx = page  # falls Frames nötig wären, hier ersetzen
+            import time
+            time.sleep(1)
+            frames = page.frames
+            print(f"[DEBUG] Frames gefunden: {len(frames)}")
+            for i, fr in enumerate(frames):
+                print(f"[DEBUG] FRAME {i}: name='{fr.name}' url='{fr.url}'")
 
-            # Studiengang-Select finden
+            target_fr = None
+            for fr in frames:
+                u = (fr.url or "").lower()
+                if any(k in u for k in ["lvplan", "stpl_week", "stpl_semester", "stundenplan", "semester"]):
+                    target_fr = fr
+                    break
+            if not target_fr and len(frames) > 1:
+                target_fr = frames[-1]
+
+            if not target_fr:
+                raise RuntimeError("Kein Inhalts-Frame gefunden.")
+
+            print(f"[DEBUG] Nutze Frame: name='{target_fr.name}' url='{target_fr.url}'")
+            ctx = target_fr
+
+            # --- Studiengang-Select finden ---
             prog_sel = None
             for selcss in [
                 "select:has(option:has-text('Studiengang auswählen'))",
@@ -73,7 +95,7 @@ def login_and_download_xlsx():
                     prog_sel = loc.first
                     break
 
-            # Semester-Select finden
+            # --- Semester-Select finden ---
             sem_sel = None
             for selcss in [
                 "select:has(option:has-text('Studiensemester auswählen'))",
@@ -87,7 +109,6 @@ def login_and_download_xlsx():
 
             import re as _re
             def select_by_text(select_loc, pattern):
-                """Suche Option per Text (Regex) und wähle dann per value aus."""
                 if not select_loc:
                     return False
                 opts = select_loc.locator("option")
@@ -104,7 +125,7 @@ def login_and_download_xlsx():
             ok_prog = select_by_text(prog_sel, r"(IKTF|IKT|Mil-IKTF)")
             ok_sem = select_by_text(sem_sel, r"^\s*1\s*$")
 
-            # Button "Semesterplan laden" klicken
+            # --- Button "Semesterplan laden" klicken ---
             clicked_btn = False
             for sel in [
                 "button:has-text('Semesterplan laden')",
@@ -122,13 +143,14 @@ def login_and_download_xlsx():
             if not clicked_btn:
                 print("[DEBUG] Konnte Button 'Semesterplan laden' nicht klicken – fahre fort.")
 
-            page.wait_for_load_state("domcontentloaded")
+            ctx.wait_for_load_state("domcontentloaded")
             time.sleep(1)
+
         except Exception as e:
             print(f"[DEBUG] Auswahl Semesterpläne Archiv fehlgeschlagen: {e}")
 
         # 4) DEBUG: Links/Buttons listen
-        links = page.locator("a")
+        links = ctx.locator("a")
         print(f"[DEBUG] Links nach Archiv-Laden: {links.count()}")
         for i in range(min(150, links.count())):
             try:
@@ -153,7 +175,7 @@ def login_and_download_xlsx():
         ]
         target = None
         for sel in candidates:
-            loc = page.locator(sel)
+            loc = ctx.locator(sel)
             if loc.count() > 0:
                 target = loc.first
                 print(f"[DEBUG] Treffer: {sel}")
@@ -172,7 +194,7 @@ def login_and_download_xlsx():
         if not target:
             raise RuntimeError("Kein Excel-/Export-Link gefunden. Selektor anpassen.")
 
-        with page.expect_download() as dl:
+        with ctx.expect_download() as dl:
             target.click()
         download = dl.value
         download.save_as(str(DOWNLOAD_XLSX_TO))
@@ -222,7 +244,8 @@ def extract_dates_from_header(df):
             if weekday_re.match(val):
                 for look in range(1, 5):
                     rr = r + look
-                    if rr >= len(df): break
+                    if rr >= len(df):
+                        break
                     s2 = str(df.iat[rr, c]).strip()
                     m = date_re.search(s2)
                     if m:
