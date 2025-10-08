@@ -221,51 +221,70 @@ def parse_xlsx_to_events(xlsx: Path):
     events = []
     for sheet in list_kw_sheets(xls):
         df = pd.read_excel(xls, sheet_name=sheet, header=None)
-        if df.empty: continue
+        if df.empty:
+            continue
 
         time_col = None
         for c in range(min(5, df.shape[1])):
             got = sum(1 for r in range(min(200, len(df))) if try_parse_time(df.iat[r, c]))
             if got > 5:
-                time_col = c; break
-        if time_col is None: continue
+                time_col = c
+                break
+        if time_col is None:
+            continue
 
         col_dates = extract_dates_from_header(df)
         day_cols = sorted(col_dates.keys())
-        if not day_cols: continue
+        if not day_cols:
+            continue
 
         start_row = None
         for r in range(len(df)):
             if try_parse_time(df.iat[r, time_col]):
-                cnt = sum(1 for k in range(r, min(r+10, len(df))) if try_parse_time(df.iat[k, time_col]))
-                if cnt >= 3: start_row = r; break
-        if start_row is None: continue
+                cnt = sum(1 for k in range(r, min(r + 10, len(df))) if try_parse_time(df.iat[k, time_col]))
+                if cnt >= 3:
+                    start_row = r
+                    break
+        if start_row is None:
+            continue
 
         r = start_row
-        while r < len(df)):
+        # ✅ hier war der Fehler: nur eine Klammer
+        while r < len(df):
             t = try_parse_time(df.iat[r, time_col])
-            if not t: r += 1; continue
+            if not t:
+                r += 1
+                continue
             start_time = t
             for c in day_cols:
                 cell = str(df.iat[r, c]).strip()
-                if not cell or cell.lower() == "nan": continue
+                if not cell or cell.lower() == "nan":
+                    continue
                 rr = r + 1
                 while rr < len(df):
                     t2 = try_parse_time(df.iat[rr, time_col])
-                    if not t2: break
-                    if str(df.iat[rr, c]).strip() != cell: break
+                    if not t2:
+                        break
+                    if str(df.iat[rr, c]).strip() != cell:
+                        break
                     rr += 1
-                end_time = try_parse_time(df.iat[rr-1, time_col])
+                end_time = try_parse_time(df.iat[rr - 1, time_col])
                 end_dt = dt.datetime.combine(col_dates[c], end_time) + dt.timedelta(minutes=5)
                 start_dt = dt.datetime.combine(col_dates[c], start_time)
                 title, lecturer, room = cell, "", ""
                 parts = [p.strip() for p in re.split(r"\s*\|\s*|\n", cell) if p.strip()]
-                if len(parts)>=1: title = parts[0]
-                if len(parts)>=2: lecturer = parts[1]
-                if len(parts)>=3: room = parts[2]
+                if len(parts) >= 1:
+                    title = parts[0]
+                if len(parts) >= 2:
+                    lecturer = parts[1]
+                if len(parts) >= 3:
+                    room = parts[2]
                 events.append({
-                    "title": title, "lecturer": lecturer, "room": room,
-                    "start": TZ.localize(start_dt), "end": TZ.localize(end_dt)
+                    "title": title,
+                    "lecturer": lecturer,
+                    "room": room,
+                    "start": TZ.localize(start_dt),
+                    "end": TZ.localize(end_dt),
                 })
             r += 1
 
