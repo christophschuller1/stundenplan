@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 CIS Stundenplan Builder (06:00 Europe/Vienna)
-- Login via HTTP Basic (Playwright http_credentials)
-- Öffnet Semesterpläne und lädt XLSX für "1. Semester … IKTF(ü)"
-- Fallback: direkter Download-Link (dms.php?id=848)
-- Parsed KW-Sheets, baut HTML + ICS
+- Login per HTTP Basic (Playwright http_credentials)
+- Geht direkt zur Semesterpläne-Liste (1. Semester) und erkennt automatisch den dms.php?id=… Link
+- Lädt XLSX, parsed KW-Sheets, erstellt HTML & ICS
+- Fallback: fester Direktlink (falls die Liste temporär nicht erreichbar ist)
 """
 import os, re, math, time
 from pathlib import Path
@@ -21,121 +21,28 @@ BASE = Path(__file__).parent.resolve()
 PUBLIC = BASE / "public"
 PUBLIC.mkdir(exist_ok=True)
 
+# ---- Konfiguration ----
 CIS_LOGIN_URL = "https://cis.miles.ac.at/cis/"
-SEMESTERPLAENE_URL = "https://cis.miles.ac.at/cis/index.php"
+# Diese URL ist (laut Logs/Screenshot) die Liste „Aktuelle Semesterpläne“ für euer 1. Semester
+SEMESTERPLAENE_LIST_URL = "https://cis.miles.ac.at/cms/news.php?studiengang_kz=888&semester=1"
 DOWNLOAD_XLSX_TO = BASE / "latest.xlsx"
 
-# <<<< Falls sich die ID ändert, hier anpassen >>>>
-FALLBACK_XLSX_URL = "https://cis.miles.ac.at/cms/dms.php?id=848"
+# Falls die Liste mal nicht lädt / geändert wird: letzter bekannter Direktlink (leicht anpassbar)
+FALLBACK_XLSX_URL = os.environ.get(
+    "FALLBACK_XLSX_URL",
+    "https://cis.miles.ac.at/cms/dms.php?id=848"
+)
+
+# Suchmuster für den richtigen Eintrag
+NAME_RE = re.compile(r"1\.\s*Semester", re.I)
+IKTF_RE = re.compile(r"IKTF(\u00fc|ue)?", re.I)  # IKTFü/IKTFue/IKTF
 
 
-# --------------------- Playwright: Login + Download --------------------- #
+# --------------------- Login + automatische Link-Erkennung --------------------- #
 
-def _pick_frames_by_url(page):
-    menu_fr, content_fr = None, None
-    for fr in page.frames:
-        u = (fr.url or "").lower()
-        if "/cis/menu.php" in u:
-            menu_fr = fr
-        if "/cms/" in u:
-            content_fr = fr
-    return menu_fr, content_fr
-
-
-def _click_semesterplaene_anywhere(page):
-    """Klicke Semesterpläne (href enthält 'semester' oder Text 'Semesterpläne') – im Menü-Frame oder auf der Seite."""
-    menu_fr, _ = _pick_frames_by_url(page)
-
-    # im Menü-Frame versuchen
-    if menu_fr:
-        links = menu_fr.locator("a")
-        for i in range(links.count()):
-            el = links.nth(i)
-            href = (el.get_attribute("href") or "").lower()
-            if "semester" in href:
-                try:
-                    el.click(timeout=2500)
-                    return True
-                except Exception:
-                    pass
-        for pat in [r"Semesterpl[aä]ne", r"LV[- ]?Plan"]:
-            try:
-                menu_fr.get_by_role("link", name=re.compile(pat, re.I)).click(timeout=2500)
-                return True
-            except Exception:
-                pass
-
-    # auf der Hauptseite versuchen
-    links = page.locator("a")
-    for i in range(links.count()):
-        el = links.nth(i)
-        href = (el.get_attribute("href") or "").lower()
-        if "semester" in href:
-            try:
-                el.click(timeout=2500)
-                return True
-            except Exception:
-                pass
-    for pat in [r"Semesterpl[aä]ne", r"LV[- ]?Plan"]:
-        try:
-            page.get_by_role("link", name=re.compile(pat, re.I)).click(timeout=2500)
-            return True
-        except Exception:
-            pass
-    return False
-
-
-def _find_xlsx_link(ctx):
-    """
-    Suche einen Link für '1. Semester … IKTF(ü)' ODER beliebige dms.php?id=…-XLSX-Links.
-    ctx = content-frame oder page
-    """
-    # 1) Textlink "1. Semester … IKTF(ü)"
-    sem_text_re = re.compile(r"^\s*1\.\s*Semester.*IKTF(\u00fc|ue)?\s*$", re.I)
-    try:
-        t = ctx.get_by_role("link", name=sem_text_re).first
-        if t.count() > 0:
-            # Excel-Icon im Umfeld
-            row = t.locator("xpath=..")
-            xlsx = row.locator("a[href$='.xlsx'], a[href$='.xls']")
-            if xlsx.count() == 0:
-                row2 = row.locator("xpath=..")
-                xlsx = row2.locator("a[href$='.xlsx'], a[href$='.xls'], a:has(img[alt*='Excel'])")
-            if xlsx.count() > 0:
-                return xlsx.first
-            # evtl. ist der Textlink selbst die Datei
-            return t
-    except Exception:
-        pass
-
-    # 2) Generisch: dms.php?id=… Links
-    try:
-        cand = ctx.locator("a[href*='dms.php?id=']")
-        if cand.count() > 0:
-            # Bevorzuge solche, deren sichtbarer Text '1. Semester' und 'IKTF' enthält
-            for i in range(min(200, cand.count())):
-                el = cand.nth(i)
-                txt = (el.inner_text() or "").strip()
-                if re.search(r"1\.\s*Semester", txt, re.I) and re.search(r"IKTF", txt, re.I):
-                    return el
-            return cand.first
-    except Exception:
-        pass
-
-    # 3) Jede .xlsx/.xls Datei
-    try:
-        cand = ctx.locator("a[href$='.xlsx'], a[href$='.xls']")
-        if cand.count() > 0:
-            return cand.first
-    except Exception:
-        pass
-
-    return None
-
-
-def login_and_download_xlsx():
+def fetch_latest_xlsx_via_browser():
     user = os.environ["CIS_USER"]
-    pw = os.environ["CIS_PASS"]
+    pw   = os.environ["CIS_PASS"]
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -145,32 +52,61 @@ def login_and_download_xlsx():
         )
         page = context.new_page()
 
-        # Login
+        # 1) Login (HTTP Basic)
         page.goto(CIS_LOGIN_URL, wait_until="domcontentloaded")
-        page.goto(SEMESTERPLAENE_URL, wait_until="domcontentloaded")
+
+        # 2) Direkt auf die Semesterpläne-Liste (vermeidet Frame-Navigation)
+        page.goto(SEMESTERPLAENE_LIST_URL, wait_until="domcontentloaded")
         time.sleep(0.6)
 
-        # Versuche, auf "Semesterpläne" zu navigieren (wenn es eine Übersichtsseite gibt)
-        _click_semesterplaene_anywhere(page)
-        page.wait_for_load_state("domcontentloaded")
-        time.sleep(0.6)
+        # 3) Kandidaten sammeln: bevorzugt dms.php?id=… Links
+        links = page.locator("a[href*='dms.php?id=']")
+        n = links.count()
+        print(f"[DEBUG] Liste geladen, dms-Links gefunden: {n}")
 
-        # Content-Kontext (Frame oder Page)
-        _, content_fr = _pick_frames_by_url(page)
-        ctx = content_fr if content_fr else page
+        target = None
+        best_txt = ""
+        # A) suche Link, dessen Text sowohl „1. Semester“ als auch „IKTF(ü)“ enthält
+        for i in range(n):
+            el = links.nth(i)
+            txt = (el.inner_text() or "").strip()
+            if NAME_RE.search(txt) and IKTF_RE.search(txt):
+                target = el
+                best_txt = txt
+                break
 
-        # Versuche Link automatisch zu finden
-        target = _find_xlsx_link(ctx)
-
-        # Fallback: direkter Link (ID)
+        # B) Falls A nicht klappt: wähle den ersten dms-Link in Nähe eines Texts der passt
         if not target:
-            print("[DEBUG] Kein Link gefunden – nutze Fallback dms.php?id=848")
+            # Scanne alle <a> (auch ohne dms) – manchmal ist das Excel-Icon ein separater Link
+            all_a = page.locator("a")
+            m = all_a.count()
+            print(f"[DEBUG] Fallback-Scan aller Links: {m}")
+            for i in range(min(500, m)):
+                try:
+                    el = all_a.nth(i)
+                    txt = (el.inner_text() or "").strip()
+                    if NAME_RE.search(txt) and IKTF_RE.search(txt):
+                        # suche in Eltern/Umfeld ein dms.php?id=…-Link (Icon)
+                        row = el.locator("xpath=..")
+                        dms = row.locator("a[href*='dms.php?id=']")
+                        if dms.count() == 0:
+                            row2 = row.locator("xpath=..")
+                            dms = row2.locator("a[href*='dms.php?id=']")
+                        if dms.count() > 0:
+                            target = dms.first
+                            best_txt = txt
+                            break
+                except Exception:
+                    pass
+
+        # C) Ultimativer Fallback: fester Direktlink
+        if not target:
+            print("[WARN] Kein dms-Link per Heuristik gefunden – nutze Fallback-ID.")
             with page.expect_download() as dl:
-                # direkter GET auf die Datei-URL
                 page.goto(FALLBACK_XLSX_URL, wait_until="domcontentloaded")
             dl.value.save_as(str(DOWNLOAD_XLSX_TO))
         else:
-            print("[DEBUG] Klicke gefundenen Download-Link …")
+            print(f"[DEBUG] Klicke Download: '{best_txt}'")
             with page.expect_download() as dl:
                 target.click()
             dl.value.save_as(str(DOWNLOAD_XLSX_TO))
@@ -354,7 +290,7 @@ def build_html(events):
 
 
 def main():
-    login_and_download_xlsx()
+    fetch_latest_xlsx_via_browser()
     events = parse_xlsx_to_events(DOWNLOAD_XLSX_TO)
     now = TZ.localize(dt.datetime.now())
     events = [e for e in events if (e["end"] >= now - dt.timedelta(days=7) and e["start"] <= now + dt.timedelta(days=120))]
