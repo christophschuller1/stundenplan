@@ -1,0 +1,35 @@
+name: Build Stundenplan (06:00 Vienna)
+on:
+  schedule:
+    - cron: '0 4 * * *'   # 04:00 UTC = 06:00 Europe/Vienna
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright pandas openpyxl ics pytz jinja2 beautifulsoup4 lxml
+          playwright install --with-deps chromium
+
+      - name: Fetch & Build
+        env:
+          CIS_USER: ${{ secrets.CIS_USER }}
+          CIS_PASS: ${{ secrets.CIS_PASS }}
+        run: |
+          python fetch_and_build.py
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
