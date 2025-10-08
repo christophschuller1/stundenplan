@@ -27,7 +27,7 @@ SEMESTERPLAENE_URL = "https://cis.miles.ac.at/cis/index.php"
 DOWNLOAD_XLSX_TO = BASE / "latest.xlsx"
 
 def login_and_download_xlsx():
-    import re
+    import re, time
     user = os.environ["CIS_USER"]
     pw = os.environ["CIS_PASS"]
     with sync_playwright() as p:
@@ -42,45 +42,57 @@ def login_and_download_xlsx():
         page.goto(CIS_LOGIN_URL, wait_until="domcontentloaded")
         page.goto(SEMESTERPLAENE_URL, wait_until="domcontentloaded")
 
-        # 2) Falls es einen "Login"-Button gibt (Landing-Page), klicken
+        # 2) Ins Menü "Semesterpläne" (deutscher Link) – Fallback LV-Plan
+        clicked = False
         try:
-            page.get_by_role("button", name=re.compile(r"login", re.I)).click(timeout=2000)
+            page.get_by_role("link", name=re.compile(r"Semesterpl[aä]ne", re.I)).click(timeout=4000)
+            page.wait_for_load_state("domcontentloaded"); clicked = True
         except Exception:
             pass
+        if not clicked:
+            try:
+                page.get_by_role("link", name=re.compile(r"LV[- ]?Plan", re.I)).click(timeout=4000)
+                page.wait_for_load_state("domcontentloaded"); clicked = True
+            except Exception:
+                pass
 
-        # 3) Auf "LV-Plan" klicken (laut deinem Log vorhanden)
+        # 3) Im Bereich "Semesterpläne Archiv" die beiden Dropdowns setzen:
+        #    a) Studiengang: auf *Mil-IKTFü* (robust: alles mit "IKT" / "IKTF")
+        #    b) Studiensemester: "1"
+        #    Dann den Button "Semesterplan laden" klicken.
+        #    (Wir wählen die SELECTs über ihre Platzhalter-Optionen.)
         try:
-            page.get_by_role("link", name=re.compile(r"LV[- ]?Plan", re.I)).click(timeout=4000)
+            prog_sel = page.locator("select:has(option:has-text('Studiengang auswählen'))").first
+            sem_sel  = page.locator("select:has(option:has-text('Studiensemester auswählen'))").first
+
+            # Studiengang wählen (Label-Match: IKT / IKTF / Mil)
+            prog_sel.select_option(label=re.compile(r"(IKTF|IKT|Mil-IKTF)", re.I))
+            # Semester 1
+            sem_sel.select_option(label=re.compile(r"^\s*1\s*$"))
+
+            # Button "Semesterplan laden" klicken
+            page.get_by_role("button", name=re.compile(r"Semesterplan\s+laden", re.I)).click(timeout=4000)
             page.wait_for_load_state("domcontentloaded")
-        except Exception:
-            pass
+            time.sleep(1)  # kurze Wartezeit, falls Tabelle asynchron rendert
+        except Exception as e:
+            print(f"[DEBUG] Auswahl Semesterpläne Archiv fehlgeschlagen: {e}")
 
-        # 4) DEBUG: Links/Buttons dieser Seite ausgeben
-        links = page.locator("a")
-        print(f"[DEBUG] Links nach LV-Plan: {links.count()}")
-        for i in range(min(200, links.count())):
+        # 4) DEBUG: Links/Buttons listen
+        links = page.locator("a"); print(f"[DEBUG] Links nach Archiv-Laden: {links.count()}")
+        for i in range(min(150, links.count())):
             try:
                 el = links.nth(i)
                 href = (el.get_attribute("href") or "").strip()
                 txt = (el.inner_text() or "").strip().replace("\n"," ")
-                print(f"[DEBUG] A {i:03d}: text='{txt}' href='{href}'")
+                if "xlsx" in href.lower() or "excel" in txt.lower() or "xls" in href.lower():
+                    print(f"[DEBUG] Kandidat {i:03d}: text='{txt}' href='{href}'")
             except Exception:
                 pass
 
-        buttons = page.locator("button, input[type='button'], input[type='submit']")
-        print(f"[DEBUG] Buttons: {buttons.count()}")
-        for i in range(min(200, buttons.count())):
-            try:
-                el = buttons.nth(i)
-                txt = (el.inner_text() or el.get_attribute("value") or "").strip()
-                print(f"[DEBUG] BTN {i:03d}: text='{txt}'")
-            except Exception:
-                pass
-
-        # 5) Excel/Export-Link oder -Button suchen (mehrere Varianten)
-        selectors = [
+        # 5) Excel-/Export-Link oder -Button suchen und klicken
+        candidates = [
             "a[href$='.xlsx']",
-            "a[href*='excel']",
+            "a[href$='.xls']",
             "a:has-text('Excel')",
             "a:has-text('XLSX')",
             "button:has-text('Excel')",
@@ -88,17 +100,15 @@ def login_and_download_xlsx():
             "input[value*='Excel']",
             "input[value*='Export']",
         ]
-
         target = None
-        for sel in selectors:
+        for sel in candidates:
             loc = page.locator(sel)
             if loc.count() > 0:
                 target = loc.first
-                print(f"[DEBUG] Treffer über Selektor: {sel}")
+                print(f"[DEBUG] Treffer: {sel}")
                 break
-
-        # Fallback: Textsuche in allen Links
         if not target:
+            # Fallback: suche manuell
             for i in range(links.count()):
                 el = links.nth(i)
                 href = (el.get_attribute("href") or "").lower()
@@ -109,9 +119,8 @@ def login_and_download_xlsx():
                     break
 
         if not target:
-            raise RuntimeError("Kein Excel/Export-Link oder -Button gefunden. Bitte Selektor anpassen.")
+            raise RuntimeError("Kein Excel-/Export-Link gefunden. Selektor anpassen.")
 
-        # 6) Download starten
         with page.expect_download() as dl:
             target.click()
         download = dl.value
