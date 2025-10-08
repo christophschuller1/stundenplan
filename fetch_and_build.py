@@ -26,6 +26,7 @@ CIS_LOGIN_URL = "https://cis.miles.ac.at/cis/"
 SEMESTERPLAENE_URL = "https://cis.miles.ac.at/cis/index.php"
 DOWNLOAD_XLSX_TO = BASE / "latest.xlsx"
 
+
 def login_and_download_xlsx():
     import re, time
     user = os.environ["CIS_USER"]
@@ -42,7 +43,7 @@ def login_and_download_xlsx():
         page.goto(CIS_LOGIN_URL, wait_until="domcontentloaded")
         page.goto(SEMESTERPLAENE_URL, wait_until="domcontentloaded")
 
-        # 2) Ins Menü "Semesterpläne" (deutscher Link) – Fallback LV-Plan
+        # 2) Ins Menü "Semesterpläne" – Fallback "LV-Plan"
         clicked = False
         try:
             page.get_by_role("link", name=re.compile(r"Semesterpl[aä]ne", re.I)).click(timeout=4000)
@@ -56,89 +57,85 @@ def login_and_download_xlsx():
             except Exception:
                 pass
 
-       # 3) Im Bereich "Semesterpläne Archiv" die beiden Dropdowns setzen,
-#    aber Optionstexte per Regex finden und dann per value auswählen (kein Regex in select_option!)
-try:
-    ctx = page  # falls du später ein Frame nutzt, hier ctx = target_fr setzen
-
-    # Studiengang-Select finden
-    prog_sel = None
-    for selcss in [
-        "select:has(option:has-text('Studiengang auswählen'))",
-        "select[name*='studiengang']",
-        "select"
-    ]:
-        loc = ctx.locator(selcss)
-        if loc.count() > 0:
-            prog_sel = loc.first
-            break
-
-    # Semester-Select finden
-    sem_sel = None
-    for selcss in [
-        "select:has(option:has-text('Studiensemester auswählen'))",
-        "select[name*='semester']",
-        "select"
-    ]:
-        loc = ctx.locator(selcss)
-        if loc.count() > 0:
-            # wenn mehrere Selects gefunden werden, nimm das zweite als Semester
-            sem_sel = loc.nth(1) if (prog_sel and loc.count() > 1) else loc.first
-            break
-
-    import re as _re
-
-    def select_by_text(select_loc, pattern):
-        """Suche Option per Text (Regex) und wähle dann per value aus."""
-        if not select_loc:
-            return False
-        opts = select_loc.locator("option")
-        n = opts.count()
-        for i in range(n):
-            txt = (opts.nth(i).inner_text() or "").strip()
-            if _re.search(pattern, txt, _re.I):
-                val = opts.nth(i).get_attribute("value") or ""
-                if val:
-                    select_loc.select_option(value=val)
-                    return True
-        return False
-
-    ok_prog = select_by_text(prog_sel, r"(IKTF|IKT|Mil-IKTF)")
-    ok_sem  = select_by_text(sem_sel,  r"^\s*1\s*$")
-
-    # Button "Semesterplan laden" klicken (mehrere Varianten ausprobieren)
-    clicked_btn = False
-    for sel in [
-        "button:has-text('Semesterplan laden')",
-        "input[type='submit'][value*='Semesterplan']",
-        "input[value*='Semesterplan']",
-        "button:has-text('laden')"
-    ]:
+        # 3) Bereich „Semesterpläne Archiv“ – Dropdowns + Button
         try:
-            ctx.locator(sel).first.click(timeout=3000)
-            clicked_btn = True
-            break
-        except Exception:
-            continue
+            ctx = page  # falls Frames nötig wären, hier ersetzen
 
-    if not clicked_btn:
-        print("[DEBUG] Konnte Button 'Semesterplan laden' nicht klicken – fahre fort.")
+            # Studiengang-Select finden
+            prog_sel = None
+            for selcss in [
+                "select:has(option:has-text('Studiengang auswählen'))",
+                "select[name*='studiengang']",
+                "select"
+            ]:
+                loc = ctx.locator(selcss)
+                if loc.count() > 0:
+                    prog_sel = loc.first
+                    break
 
-    page.wait_for_load_state("domcontentloaded")
-    time.sleep(1)  # kurze Wartezeit, falls Tabelle asynchron rendert
+            # Semester-Select finden
+            sem_sel = None
+            for selcss in [
+                "select:has(option:has-text('Studiensemester auswählen'))",
+                "select[name*='semester']",
+                "select"
+            ]:
+                loc = ctx.locator(selcss)
+                if loc.count() > 0:
+                    sem_sel = loc.nth(1) if (prog_sel and loc.count() > 1) else loc.first
+                    break
 
-except Exception as e:
-    print(f"[DEBUG] Auswahl Semesterpläne Archiv fehlgeschlagen: {e}")
+            import re as _re
+            def select_by_text(select_loc, pattern):
+                """Suche Option per Text (Regex) und wähle dann per value aus."""
+                if not select_loc:
+                    return False
+                opts = select_loc.locator("option")
+                n = opts.count()
+                for i in range(n):
+                    txt = (opts.nth(i).inner_text() or "").strip()
+                    if _re.search(pattern, txt, _re.I):
+                        val = opts.nth(i).get_attribute("value") or ""
+                        if val:
+                            select_loc.select_option(value=val)
+                            return True
+                return False
 
+            ok_prog = select_by_text(prog_sel, r"(IKTF|IKT|Mil-IKTF)")
+            ok_sem = select_by_text(sem_sel, r"^\s*1\s*$")
+
+            # Button "Semesterplan laden" klicken
+            clicked_btn = False
+            for sel in [
+                "button:has-text('Semesterplan laden')",
+                "input[type='submit'][value*='Semesterplan']",
+                "input[value*='Semesterplan']",
+                "button:has-text('laden')"
+            ]:
+                try:
+                    ctx.locator(sel).first.click(timeout=3000)
+                    clicked_btn = True
+                    break
+                except Exception:
+                    continue
+
+            if not clicked_btn:
+                print("[DEBUG] Konnte Button 'Semesterplan laden' nicht klicken – fahre fort.")
+
+            page.wait_for_load_state("domcontentloaded")
+            time.sleep(1)
+        except Exception as e:
+            print(f"[DEBUG] Auswahl Semesterpläne Archiv fehlgeschlagen: {e}")
 
         # 4) DEBUG: Links/Buttons listen
-        links = page.locator("a"); print(f"[DEBUG] Links nach Archiv-Laden: {links.count()}")
+        links = page.locator("a")
+        print(f"[DEBUG] Links nach Archiv-Laden: {links.count()}")
         for i in range(min(150, links.count())):
             try:
                 el = links.nth(i)
                 href = (el.get_attribute("href") or "").strip()
-                txt = (el.inner_text() or "").strip().replace("\n"," ")
-                if "xlsx" in href.lower() or "excel" in txt.lower() or "xls" in href.lower():
+                txt = (el.inner_text() or "").strip().replace("\n", " ")
+                if "xlsx" in href.lower() or "xls" in href.lower() or "excel" in txt.lower():
                     print(f"[DEBUG] Kandidat {i:03d}: text='{txt}' href='{href}'")
             except Exception:
                 pass
@@ -161,8 +158,8 @@ except Exception as e:
                 target = loc.first
                 print(f"[DEBUG] Treffer: {sel}")
                 break
+
         if not target:
-            # Fallback: suche manuell
             for i in range(links.count()):
                 el = links.nth(i)
                 href = (el.get_attribute("href") or "").lower()
@@ -185,15 +182,12 @@ except Exception as e:
 
 
 def list_kw_sheets(xls: pd.ExcelFile):
-    # Blätter, die wie Kalenderwochen aussehen (z.B. '41','01',...)
     kws = []
     for s in xls.sheet_names:
         if re.fullmatch(r"\d{2}", str(s)) or re.fullmatch(r"\d{2}", str(s).zfill(2)):
             kws.append(s)
         elif re.fullmatch(r"\d{2}", str(s)[-2:]):
-            # handle '01' stored strangely
             kws.append(s)
-    # Reihenfolge numerisch sortieren (über den Jahreswechsel hinaus)
     def keyf(k):
         try:
             return int(str(k)[-2:])
@@ -201,8 +195,8 @@ def list_kw_sheets(xls: pd.ExcelFile):
             return 999
     return sorted(kws, key=keyf)
 
-def try_parse_time(cell) -> dt.time|None:
-    # akzeptiere "07:15", "7:05", Excel-Zeit (float/Datetime), oder Minuten-Spalten
+
+def try_parse_time(cell) -> dt.time | None:
     if cell is None or (isinstance(cell, float) and math.isnan(cell)):
         return None
     if isinstance(cell, dt.time):
@@ -213,16 +207,12 @@ def try_parse_time(cell) -> dt.time|None:
     m = re.match(r"^(\d{1,2}):(\d{2})$", s)
     if m:
         hh, mm = int(m.group(1)), int(m.group(2))
-        if 0<=hh<24 and 0<=mm<60:
+        if 0 <= hh < 24 and 0 <= mm < 60:
             return dt.time(hh, mm)
     return None
 
+
 def extract_dates_from_header(df):
-    """
-    Heuristisch: Suche in ersten ~25 Zeilen nach Wochentag-Zeilen (Montag..Freitag)
-    und direkt darunter Datum im Format 'dd mm yyyy' oder 'dd.mm.yyyy'.
-    Liefert dict: {col_index: date}
-    """
     weekday_re = re.compile(r"^(Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag)$", re.I)
     date_re = re.compile(r"(\d{1,2})[.\s](\d{1,2})[.\s](\d{4})")
     col_date = {}
@@ -230,9 +220,8 @@ def extract_dates_from_header(df):
         for c in range(0, df.shape[1]):
             val = str(df.iat[r, c]).strip()
             if weekday_re.match(val):
-                # check next rows for a date
-                for look in range(1,5):
-                    rr = r+look
+                for look in range(1, 5):
+                    rr = r + look
                     if rr >= len(df): break
                     s2 = str(df.iat[rr, c]).strip()
                     m = date_re.search(s2)
@@ -240,21 +229,22 @@ def extract_dates_from_header(df):
                         d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
                         try:
                             col_date[c] = dt.date(y, mo, d)
-                        except: pass
+                        except:
+                            pass
                         break
     return col_date
+
 
 def parse_xlsx_to_events(xlsx: Path):
     xls = pd.ExcelFile(xlsx)
     events = []
     for sheet in list_kw_sheets(xls):
         df = pd.read_excel(xls, sheet_name=sheet, header=None)
-        if df.empty: continue
+        if df.empty:
+            continue
 
-        # 1) Zeitspalte(n) finden (erste Spalte mit erkennbaren HH:MM)
         time_col = None
         for c in range(min(5, df.shape[1])):
-            # prüfe die ersten 200 Zeilen stichprobenartig
             got = 0
             for r in range(min(200, len(df))):
                 if try_parse_time(df.iat[r, c]):
@@ -263,43 +253,37 @@ def parse_xlsx_to_events(xlsx: Path):
                 time_col = c
                 break
         if time_col is None:
-            # not found → überspringen dieses Blatt
             continue
 
-        # 2) Day-Columns + Datum ermitteln
         col_dates = extract_dates_from_header(df)
         day_cols = sorted(col_dates.keys())
         if not day_cols:
             continue
 
-        # 3) Start der eigentlichen Zeitzeilen finden (erste Reihe mit gültiger Zeit + folgend weitere Zeiten)
         start_row = None
         for r in range(len(df)):
             if try_parse_time(df.iat[r, time_col]):
-                # check next few rows too
-                cnt=0
-                for k in range(r, min(r+10, len(df))):
-                    if try_parse_time(df.iat[k, time_col]): cnt+=1
-                if cnt>=3:
+                cnt = 0
+                for k in range(r, min(r + 10, len(df))):
+                    if try_parse_time(df.iat[k, time_col]):
+                        cnt += 1
+                if cnt >= 3:
                     start_row = r
                     break
         if start_row is None:
             continue
 
-        # 4) Über alle Zeit-Slots iterieren; zusammenhängende Blöcke gleicher Zellen pro Tag mergen
         r = start_row
         while r < len(df):
             t = try_parse_time(df.iat[r, time_col])
             if not t:
                 r += 1
                 continue
-            # slot dauert 5 Minuten
             start_time = t
             for c in day_cols:
                 cell = str(df.iat[r, c]).strip()
                 if not cell or cell.lower() in ("nan",):
                     continue
-                # Merge gleiche Inhalte nach unten
                 rr = r + 1
                 while rr < len(df):
                     t2 = try_parse_time(df.iat[rr, time_col])
@@ -309,16 +293,17 @@ def parse_xlsx_to_events(xlsx: Path):
                     if cell2 != cell:
                         break
                     rr += 1
-                end_time = try_parse_time(df.iat[rr-1, time_col])
-                # end time = last slot start + 5min
+                end_time = try_parse_time(df.iat[rr - 1, time_col])
                 end_dt = dt.datetime.combine(col_dates[c], end_time) + dt.timedelta(minutes=5)
                 start_dt = dt.datetime.combine(col_dates[c], start_time)
-                # split title|lecturer|room heuristisch
                 title, lecturer, room = cell, "", ""
                 parts = [p.strip() for p in re.split(r"\s*\|\s*|\n", cell) if p.strip()]
-                if len(parts)>=1: title = parts[0]
-                if len(parts)>=2: lecturer = parts[1]
-                if len(parts)>=3: room = parts[2]
+                if len(parts) >= 1:
+                    title = parts[0]
+                if len(parts) >= 2:
+                    lecturer = parts[1]
+                if len(parts) >= 3:
+                    room = parts[2]
                 events.append({
                     "title": title,
                     "lecturer": lecturer,
@@ -326,16 +311,15 @@ def parse_xlsx_to_events(xlsx: Path):
                     "start": TZ.localize(start_dt),
                     "end": TZ.localize(end_dt),
                 })
-            r = r + 1
+            r += 1
 
-    # Filtere leere/fehlerhafte Einträge
     events = [e for e in events if e["end"] > e["start"]]
-    # Merge identische Duplikate (selten, aber sicher ist sicher)
     uniq = {}
     for e in events:
         key = (e["title"], e["lecturer"], e["room"], e["start"], e["end"])
         uniq[key] = e
     return list(uniq.values())
+
 
 def build_ics(events):
     cal = Calendar()
@@ -345,12 +329,15 @@ def build_ics(events):
         ev.begin = e["start"]
         ev.end = e["end"]
         desc = []
-        if e["lecturer"]: desc.append(f"Dozent: {e['lecturer']}")
-        if e["room"]: desc.append(f"Raum: {e['room']}")
+        if e["lecturer"]:
+            desc.append(f"Dozent: {e['lecturer']}")
+        if e["room"]:
+            desc.append(f"Raum: {e['room']}")
         ev.description = "\n".join(desc) if desc else ""
         ev.location = e["room"] or ""
         cal.events.add(ev)
     (PUBLIC / "stundenplan.ics").write_text(str(cal), encoding="utf-8")
+
 
 def build_html(events):
     tmpl = Template("""
@@ -383,7 +370,6 @@ def build_html(events):
   </div>
 {% endfor %}
 """)
-    # gruppieren nach Tag
     by_day = {}
     for e in events:
         d = e["start"].date()
@@ -393,14 +379,13 @@ def build_html(events):
         items.sort(key=lambda x: x["start"])
         days.append((d, items))
     days.sort(key=lambda x: x[0])
-
     html = tmpl.render(days=days)
     (PUBLIC / "index.html").write_text(html, encoding="utf-8")
+
 
 def main():
     login_and_download_xlsx()
     events = parse_xlsx_to_events(DOWNLOAD_XLSX_TO)
-    # Exportiere nur +/- 90 Tage um die Gegenwart (übersichtlich)
     now = TZ.localize(dt.datetime.now())
     start_cut = now - dt.timedelta(days=7)
     end_cut = now + dt.timedelta(days=120)
@@ -408,6 +393,7 @@ def main():
     build_ics(events)
     build_html(events)
     print(f"OK: {len(events)} Termine exportiert.")
+
 
 if __name__ == "__main__":
     main()
