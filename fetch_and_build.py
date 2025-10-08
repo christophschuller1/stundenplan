@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 Daily 06:00 builder:
-- Logs into CIS (HTTP Basic Auth popup) using Playwright http_credentials
-- Opens "Semesterpläne" and downloads the XLSX for "1. Semester Mil-IKTFü"
-- Parses the workbook (sheets named by KW like '41', '42', ...)
-- Builds a mobile-first index.html and an ICS feed
+- Logs into CIS (HTTP Basic Auth) via Playwright http_credentials
+- Opens "Semesterpläne" (left menu) and downloads the XLSX for "1. Semester Mil-IKTFü"
+- Parses the workbook (KW-Sheets)
+- Builds mobile-first index.html and an ICS feed
 """
 import os, re, math
 from pathlib import Path
@@ -44,110 +44,103 @@ def login_and_download_xlsx():
         page.goto(CIS_LOGIN_URL, wait_until="domcontentloaded")
         page.goto(SEMESTERPLAENE_URL, wait_until="domcontentloaded")
 
-        # 2) In die Seite "Semesterpläne" wechseln (Menü oder Link)
-        clicked = False
-        for pat in [r"Semesterpl[aä]ne", r"LV[- ]?Plan"]:
-            try:
-                page.get_by_role("link", name=re.compile(pat, re.I)).click(timeout=3000)
-                page.wait_for_load_state("domcontentloaded")
-                clicked = True
-                break
-            except Exception:
-                continue
-
-        # 3) Frames identifizieren
+        # 2) Frames ermitteln
         time.sleep(0.8)
-        frames = page.frames
-        print(f"[DEBUG] Frames gefunden: {len(frames)}")
-        for i, fr in enumerate(frames):
+        print(f"[DEBUG] Frames gefunden: {len(page.frames)}")
+        for i, fr in enumerate(page.frames):
             print(f"[DEBUG] FRAME {i}: name='{fr.name}' url='{fr.url}'")
 
-        menu_fr = None
-        content_fr = None
-        for fr in frames:
-            n = (fr.name or "").lower()
-            if "menu" in n:
-                menu_fr = fr
-            if "content" in n:
-                content_fr = fr
+        menu_fr = page.frame(name="menu")
+        content_fr = page.frame(name="content")
 
-        # Falls Menüframe existiert → dort explizit auf „Semesterpläne“ klicken
+        # 3) Im Menü-Frame auf "Semesterpläne" klicken (Fallback LV-Plan)
         if menu_fr:
-            did = False
+            clicked = False
             for pat in [r"Semesterpl[aä]ne", r"LV[- ]?Plan"]:
                 try:
-                    menu_fr.get_by_role("link", name=re.compile(pat, re.I)).click(timeout=2500)
-                    did = True
+                    menu_fr.get_by_role("link", name=re.compile(pat, re.I)).click(timeout=3000)
+                    clicked = True
                     break
                 except Exception:
                     pass
-            if did:
-                time.sleep(0.8)
-                # Content-Frame neu ermitteln
-                for fr in page.frames:
-                    if (fr.name or "").lower().startswith("content"):
-                        content_fr = fr
+            if not clicked:
+                # Fallback: Links durchgehen
+                links = menu_fr.locator("a")
+                for i in range(min(100, links.count())):
+                    try:
+                        el = links.nth(i)
+                        txt = (el.inner_text() or "").strip()
+                        if re.search(r"Semesterpl[aä]ne|LV[- ]?Plan", txt, re.I):
+                            el.click()
+                            clicked = True
+                            break
+                    except Exception:
+                        pass
 
-        ctx = content_fr if content_fr else page
-        print(f"[DEBUG] Nutze Kontext: {'content-frame' if content_fr else 'page'} url='{getattr(ctx,'url','n/a')}'")
+        # Content-Frame neu holen (nach Menü-Klick)
+        time.sleep(0.8)
+        content_fr = page.frame(name="content") or page
 
-        # 4) Ziel-Link definieren (1. Semester Mil-IKTFü – ü/ue tolerant)
+        print(f"[DEBUG] Nutze Kontext: {'content-frame' if isinstance(content_fr, type(page.frame())) else 'page'} url='{getattr(content_fr, 'url', 'n/a')}'")
+
+        # 4) Zieltext: 1. Semester Mil-IKTFü (ue/Ü tolerant)
         sem_text_re = re.compile(r"^\s*1\.\s*Semester\s+Mil[-\s]?IKTF(\u00fc|ue)?\s*$", re.I)
 
-        # a) Versuche zuerst das Excel-Icon (im selben Eintrag) zu klicken
-        download_clicked = False
+        # 5) Versuch A: Excel-Icon neben dem Textlink
+        download_done = False
         try:
-            # finde den Text-Link
-            text_link = ctx.get_by_role("link", name=sem_text_re).first
+            text_link = content_fr.get_by_role("link", name=sem_text_re).first
             if text_link.count() > 0:
-                # gehe zum Elternknoten und suche dort nach einem .xlsx Link (Icon)
                 row = text_link.locator("xpath=..")
-                xlsx_link = row.locator("a[href$='.xlsx'], a[href$='.xls']")
-                if xlsx_link.count() == 0:
-                    # ggf. ein Level höher schauen
+                xlsx = row.locator("a[href$='.xlsx'], a[href$='.xls']")
+                if xlsx.count() == 0:
                     row2 = row.locator("xpath=..")
-                    xlsx_link = row2.locator("a[href$='.xlsx'], a[href$='.xls']")
-                if xlsx_link.count() > 0:
-                    print("[DEBUG] Klicke Excel-Icon neben dem Textlink …")
-                    with ctx.expect_download() as dl:
-                        xlsx_link.first.click()
+                    xlsx = row2.locator("a[href$='.xlsx'], a[href$='.xls']")
+                if xlsx.count() > 0:
+                    print("[DEBUG] Klicke Excel-Icon …")
+                    # WICHTIG: expect_download auf PAGE, nicht auf Frame
+                    with page.expect_download() as dl:
+                        xlsx.first.click()
                     dl.value.save_as(str(DOWNLOAD_XLSX_TO))
-                    download_clicked = True
+                    download_done = True
         except Exception as e:
-            print(f"[DEBUG] Excel-Icon-Suche fehlschlagen: {e}")
+            print(f"[DEBUG] Icon-Download fehlgeschlagen: {e}")
 
-        # b) Wenn kein Icon: direkt den Text-Link klicken (startet laut User auch den Download)
-        if not download_clicked:
+        # 6) Versuch B: Textlink direkt klicken (laut User startet das auch den Download)
+        if not download_done:
             try:
-                link = ctx.get_by_role("link", name=sem_text_re).first
+                link = content_fr.get_by_role("link", name=sem_text_re).first
                 if link.count() == 0:
                     raise RuntimeError("Textlink '1. Semester Mil-IKTFü' nicht gefunden.")
-                print("[DEBUG] Klicke Textlink für Download …")
-                with ctx.expect_download() as dl:
+                print("[DEBUG] Klicke Textlink …")
+                with page.expect_download() as dl:
                     link.click()
                 dl.value.save_as(str(DOWNLOAD_XLSX_TO))
-                download_clicked = True
+                download_done = True
             except Exception as e:
                 print(f"[DEBUG] Textlink-Download fehlgeschlagen: {e}")
 
-        if not download_clicked:
-            # Letzter Fallback: alle Links dumpen und heuristisch wählen
-            links = ctx.locator("a")
+        # 7) Letzter Fallback: alle Links scannen und heuristisch wählen
+        if not download_done:
+            links = content_fr.locator("a")
             n = links.count()
             print(f"[DEBUG] Fallback: scanne {n} Links …")
-            for i in range(min(200, n)):
-                el = links.nth(i)
-                href = (el.get_attribute("href") or "").strip()
-                txt = (el.inner_text() or "").strip().replace("\n", " ")
-                if (".xlsx" in href.lower() or ".xls" in href.lower()) and re.search(r"1\.\s*Semester.*IKTF", txt, re.I):
-                    print(f"[DEBUG] Fallback-Download-Link: text='{txt}' href='{href}'")
-                    with ctx.expect_download() as dl:
-                        el.click()
-                    dl.value.save_as(str(DOWNLOAD_XLSX_TO))
-                    download_clicked = True
-                    break
+            for i in range(min(300, n)):
+                try:
+                    el = links.nth(i)
+                    href = (el.get_attribute("href") or "").lower()
+                    txt = (el.inner_text() or "").strip()
+                    if (".xlsx" in href or ".xls" in href) and re.search(r"1\.\s*Semester.*IKTF", txt, re.I):
+                        print(f"[DEBUG] Fallback-Link: text='{txt}' href='{href}'")
+                        with page.expect_download() as dl:
+                            el.click()
+                        dl.value.save_as(str(DOWNLOAD_XLSX_TO))
+                        download_done = True
+                        break
+                except Exception:
+                    pass
 
-        if not download_clicked:
+        if not download_done:
             raise RuntimeError("Kein Download für '1. Semester Mil-IKTFü' gefunden.")
 
         context.close()
@@ -216,7 +209,7 @@ def parse_xlsx_to_events(xlsx: Path):
         if df.empty:
             continue
 
-        # 1) Zeitspalte finden
+        # 1) Zeitspalte(n) finden
         time_col = None
         for c in range(min(5, df.shape[1])):
             got = 0
@@ -229,13 +222,13 @@ def parse_xlsx_to_events(xlsx: Path):
         if time_col is None:
             continue
 
-        # 2) Datumszeilen/Spalten ermitteln
+        # 2) Datumsspalten finden
         col_dates = extract_dates_from_header(df)
         day_cols = sorted(col_dates.keys())
         if not day_cols:
             continue
 
-        # 3) Startzeile der Zeitraster finden
+        # 3) Start der Zeitraster finden
         start_row = None
         for r in range(len(df)):
             if try_parse_time(df.iat[r, time_col]):
@@ -249,7 +242,7 @@ def parse_xlsx_to_events(xlsx: Path):
         if start_row is None:
             continue
 
-        # 4) Slots zusammenfassen → Events
+        # 4) Slots zu Events aggregieren
         r = start_row
         while r < len(df):
             t = try_parse_time(df.iat[r, time_col])
@@ -287,7 +280,7 @@ def parse_xlsx_to_events(xlsx: Path):
                 })
             r += 1
 
-    # Dubletten filtern
+    # Dubletten raus
     events = [e for e in events if e["end"] > e["start"]]
     uniq = {}
     for e in events:
