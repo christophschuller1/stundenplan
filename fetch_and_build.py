@@ -2,7 +2,7 @@
 """
 Daily 06:00 builder:
 - Logs into CIS (HTTP Basic Auth popup) using Playwright http_credentials
-- Navigates to Semesterpläne and downloads the XLSX (first .xlsx link on the page by default)
+- Opens "Semesterpläne" and downloads the XLSX for "1. Semester Mil-IKTFü"
 - Parses the workbook (sheets named by KW like '41', '42', ...)
 - Builds a mobile-first index.html and an ICS feed
 """
@@ -28,9 +28,10 @@ DOWNLOAD_XLSX_TO = BASE / "latest.xlsx"
 
 
 def login_and_download_xlsx():
-    import re, time
+    import time
     user = os.environ["CIS_USER"]
     pw = os.environ["CIS_PASS"]
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -39,165 +40,115 @@ def login_and_download_xlsx():
         )
         page = context.new_page()
 
-        # 1) Start + Login (HTTP Basic)
+        # 1) Start + Login
         page.goto(CIS_LOGIN_URL, wait_until="domcontentloaded")
         page.goto(SEMESTERPLAENE_URL, wait_until="domcontentloaded")
 
-        # 2) Ins Menü "Semesterpläne" – Fallback "LV-Plan"
+        # 2) In die Seite "Semesterpläne" wechseln (Menü oder Link)
         clicked = False
-        try:
-            page.get_by_role("link", name=re.compile(r"Semesterpl[aä]ne", re.I)).click(timeout=4000)
-            page.wait_for_load_state("domcontentloaded")
-            clicked = True
-        except Exception:
-            pass
-        if not clicked:
+        for pat in [r"Semesterpl[aä]ne", r"LV[- ]?Plan"]:
             try:
-                page.get_by_role("link", name=re.compile(r"LV[- ]?Plan", re.I)).click(timeout=4000)
+                page.get_by_role("link", name=re.compile(pat, re.I)).click(timeout=3000)
                 page.wait_for_load_state("domcontentloaded")
                 clicked = True
+                break
             except Exception:
-                pass
+                continue
 
-        # 3) Inhalts-Frame finden (darin liegen die Dropdowns & Buttons)
-        try:
-            import time
-            time.sleep(1)
-            frames = page.frames
-            print(f"[DEBUG] Frames gefunden: {len(frames)}")
-            for i, fr in enumerate(frames):
-                print(f"[DEBUG] FRAME {i}: name='{fr.name}' url='{fr.url}'")
+        # 3) Frames identifizieren
+        time.sleep(0.8)
+        frames = page.frames
+        print(f"[DEBUG] Frames gefunden: {len(frames)}")
+        for i, fr in enumerate(frames):
+            print(f"[DEBUG] FRAME {i}: name='{fr.name}' url='{fr.url}'")
 
-            target_fr = None
-            for fr in frames:
-                u = (fr.url or "").lower()
-                if any(k in u for k in ["lvplan", "stpl_week", "stpl_semester", "stundenplan", "semester"]):
-                    target_fr = fr
-                    break
-            if not target_fr and len(frames) > 1:
-                target_fr = frames[-1]
+        menu_fr = None
+        content_fr = None
+        for fr in frames:
+            n = (fr.name or "").lower()
+            if "menu" in n:
+                menu_fr = fr
+            if "content" in n:
+                content_fr = fr
 
-            if not target_fr:
-                raise RuntimeError("Kein Inhalts-Frame gefunden.")
-
-            print(f"[DEBUG] Nutze Frame: name='{target_fr.name}' url='{target_fr.url}'")
-            ctx = target_fr
-
-            # --- Studiengang-Select finden ---
-            prog_sel = None
-            for selcss in [
-                "select:has(option:has-text('Studiengang auswählen'))",
-                "select[name*='studiengang']",
-                "select"
-            ]:
-                loc = ctx.locator(selcss)
-                if loc.count() > 0:
-                    prog_sel = loc.first
-                    break
-
-            # --- Semester-Select finden ---
-            sem_sel = None
-            for selcss in [
-                "select:has(option:has-text('Studiensemester auswählen'))",
-                "select[name*='semester']",
-                "select"
-            ]:
-                loc = ctx.locator(selcss)
-                if loc.count() > 0:
-                    sem_sel = loc.nth(1) if (prog_sel and loc.count() > 1) else loc.first
-                    break
-
-            import re as _re
-            def select_by_text(select_loc, pattern):
-                if not select_loc:
-                    return False
-                opts = select_loc.locator("option")
-                n = opts.count()
-                for i in range(n):
-                    txt = (opts.nth(i).inner_text() or "").strip()
-                    if _re.search(pattern, txt, _re.I):
-                        val = opts.nth(i).get_attribute("value") or ""
-                        if val:
-                            select_loc.select_option(value=val)
-                            return True
-                return False
-
-            ok_prog = select_by_text(prog_sel, r"(IKTF|IKT|Mil-IKTF)")
-            ok_sem = select_by_text(sem_sel, r"^\s*1\s*$")
-
-            # --- Button "Semesterplan laden" klicken ---
-            clicked_btn = False
-            for sel in [
-                "button:has-text('Semesterplan laden')",
-                "input[type='submit'][value*='Semesterplan']",
-                "input[value*='Semesterplan']",
-                "button:has-text('laden')"
-            ]:
+        # Falls Menüframe existiert → dort explizit auf „Semesterpläne“ klicken
+        if menu_fr:
+            did = False
+            for pat in [r"Semesterpl[aä]ne", r"LV[- ]?Plan"]:
                 try:
-                    ctx.locator(sel).first.click(timeout=3000)
-                    clicked_btn = True
+                    menu_fr.get_by_role("link", name=re.compile(pat, re.I)).click(timeout=2500)
+                    did = True
                     break
                 except Exception:
-                    continue
+                    pass
+            if did:
+                time.sleep(0.8)
+                # Content-Frame neu ermitteln
+                for fr in page.frames:
+                    if (fr.name or "").lower().startswith("content"):
+                        content_fr = fr
 
-            if not clicked_btn:
-                print("[DEBUG] Konnte Button 'Semesterplan laden' nicht klicken – fahre fort.")
+        ctx = content_fr if content_fr else page
+        print(f"[DEBUG] Nutze Kontext: {'content-frame' if content_fr else 'page'} url='{getattr(ctx,'url','n/a')}'")
 
-            ctx.wait_for_load_state("domcontentloaded")
-            time.sleep(1)
+        # 4) Ziel-Link definieren (1. Semester Mil-IKTFü – ü/ue tolerant)
+        sem_text_re = re.compile(r"^\s*1\.\s*Semester\s+Mil[-\s]?IKTF(\u00fc|ue)?\s*$", re.I)
 
+        # a) Versuche zuerst das Excel-Icon (im selben Eintrag) zu klicken
+        download_clicked = False
+        try:
+            # finde den Text-Link
+            text_link = ctx.get_by_role("link", name=sem_text_re).first
+            if text_link.count() > 0:
+                # gehe zum Elternknoten und suche dort nach einem .xlsx Link (Icon)
+                row = text_link.locator("xpath=..")
+                xlsx_link = row.locator("a[href$='.xlsx'], a[href$='.xls']")
+                if xlsx_link.count() == 0:
+                    # ggf. ein Level höher schauen
+                    row2 = row.locator("xpath=..")
+                    xlsx_link = row2.locator("a[href$='.xlsx'], a[href$='.xls']")
+                if xlsx_link.count() > 0:
+                    print("[DEBUG] Klicke Excel-Icon neben dem Textlink …")
+                    with ctx.expect_download() as dl:
+                        xlsx_link.first.click()
+                    dl.value.save_as(str(DOWNLOAD_XLSX_TO))
+                    download_clicked = True
         except Exception as e:
-            print(f"[DEBUG] Auswahl Semesterpläne Archiv fehlgeschlagen: {e}")
+            print(f"[DEBUG] Excel-Icon-Suche fehlschlagen: {e}")
 
-        # 4) DEBUG: Links/Buttons listen
-        links = ctx.locator("a")
-        print(f"[DEBUG] Links nach Archiv-Laden: {links.count()}")
-        for i in range(min(150, links.count())):
+        # b) Wenn kein Icon: direkt den Text-Link klicken (startet laut User auch den Download)
+        if not download_clicked:
             try:
+                link = ctx.get_by_role("link", name=sem_text_re).first
+                if link.count() == 0:
+                    raise RuntimeError("Textlink '1. Semester Mil-IKTFü' nicht gefunden.")
+                print("[DEBUG] Klicke Textlink für Download …")
+                with ctx.expect_download() as dl:
+                    link.click()
+                dl.value.save_as(str(DOWNLOAD_XLSX_TO))
+                download_clicked = True
+            except Exception as e:
+                print(f"[DEBUG] Textlink-Download fehlgeschlagen: {e}")
+
+        if not download_clicked:
+            # Letzter Fallback: alle Links dumpen und heuristisch wählen
+            links = ctx.locator("a")
+            n = links.count()
+            print(f"[DEBUG] Fallback: scanne {n} Links …")
+            for i in range(min(200, n)):
                 el = links.nth(i)
                 href = (el.get_attribute("href") or "").strip()
                 txt = (el.inner_text() or "").strip().replace("\n", " ")
-                if "xlsx" in href.lower() or "xls" in href.lower() or "excel" in txt.lower():
-                    print(f"[DEBUG] Kandidat {i:03d}: text='{txt}' href='{href}'")
-            except Exception:
-                pass
-
-        # 5) Excel-/Export-Link oder -Button suchen und klicken
-        candidates = [
-            "a[href$='.xlsx']",
-            "a[href$='.xls']",
-            "a:has-text('Excel')",
-            "a:has-text('XLSX')",
-            "button:has-text('Excel')",
-            "button:has-text('Export')",
-            "input[value*='Excel']",
-            "input[value*='Export']",
-        ]
-        target = None
-        for sel in candidates:
-            loc = ctx.locator(sel)
-            if loc.count() > 0:
-                target = loc.first
-                print(f"[DEBUG] Treffer: {sel}")
-                break
-
-        if not target:
-            for i in range(links.count()):
-                el = links.nth(i)
-                href = (el.get_attribute("href") or "").lower()
-                txt = (el.inner_text() or "").lower()
-                if ".xlsx" in href or ".xls" in href or "excel" in txt or "export" in txt:
-                    target = el
-                    print(f"[DEBUG] Fallback-Link gewählt: text='{txt}' href='{href}'")
+                if (".xlsx" in href.lower() or ".xls" in href.lower()) and re.search(r"1\.\s*Semester.*IKTF", txt, re.I):
+                    print(f"[DEBUG] Fallback-Download-Link: text='{txt}' href='{href}'")
+                    with ctx.expect_download() as dl:
+                        el.click()
+                    dl.value.save_as(str(DOWNLOAD_XLSX_TO))
+                    download_clicked = True
                     break
 
-        if not target:
-            raise RuntimeError("Kein Excel-/Export-Link gefunden. Selektor anpassen.")
-
-        with ctx.expect_download() as dl:
-            target.click()
-        download = dl.value
-        download.save_as(str(DOWNLOAD_XLSX_TO))
+        if not download_clicked:
+            raise RuntimeError("Kein Download für '1. Semester Mil-IKTFü' gefunden.")
 
         context.close()
         browser.close()
@@ -244,8 +195,7 @@ def extract_dates_from_header(df):
             if weekday_re.match(val):
                 for look in range(1, 5):
                     rr = r + look
-                    if rr >= len(df):
-                        break
+                    if rr >= len(df): break
                     s2 = str(df.iat[rr, c]).strip()
                     m = date_re.search(s2)
                     if m:
@@ -266,6 +216,7 @@ def parse_xlsx_to_events(xlsx: Path):
         if df.empty:
             continue
 
+        # 1) Zeitspalte finden
         time_col = None
         for c in range(min(5, df.shape[1])):
             got = 0
@@ -278,11 +229,13 @@ def parse_xlsx_to_events(xlsx: Path):
         if time_col is None:
             continue
 
+        # 2) Datumszeilen/Spalten ermitteln
         col_dates = extract_dates_from_header(df)
         day_cols = sorted(col_dates.keys())
         if not day_cols:
             continue
 
+        # 3) Startzeile der Zeitraster finden
         start_row = None
         for r in range(len(df)):
             if try_parse_time(df.iat[r, time_col]):
@@ -296,6 +249,7 @@ def parse_xlsx_to_events(xlsx: Path):
         if start_row is None:
             continue
 
+        # 4) Slots zusammenfassen → Events
         r = start_row
         while r < len(df):
             t = try_parse_time(df.iat[r, time_col])
@@ -305,7 +259,7 @@ def parse_xlsx_to_events(xlsx: Path):
             start_time = t
             for c in day_cols:
                 cell = str(df.iat[r, c]).strip()
-                if not cell or cell.lower() in ("nan",):
+                if not cell or cell.lower() == "nan":
                     continue
                 rr = r + 1
                 while rr < len(df):
@@ -321,12 +275,9 @@ def parse_xlsx_to_events(xlsx: Path):
                 start_dt = dt.datetime.combine(col_dates[c], start_time)
                 title, lecturer, room = cell, "", ""
                 parts = [p.strip() for p in re.split(r"\s*\|\s*|\n", cell) if p.strip()]
-                if len(parts) >= 1:
-                    title = parts[0]
-                if len(parts) >= 2:
-                    lecturer = parts[1]
-                if len(parts) >= 3:
-                    room = parts[2]
+                if len(parts) >= 1: title = parts[0]
+                if len(parts) >= 2: lecturer = parts[1]
+                if len(parts) >= 3: room = parts[2]
                 events.append({
                     "title": title,
                     "lecturer": lecturer,
@@ -336,6 +287,7 @@ def parse_xlsx_to_events(xlsx: Path):
                 })
             r += 1
 
+    # Dubletten filtern
     events = [e for e in events if e["end"] > e["start"]]
     uniq = {}
     for e in events:
@@ -352,10 +304,8 @@ def build_ics(events):
         ev.begin = e["start"]
         ev.end = e["end"]
         desc = []
-        if e["lecturer"]:
-            desc.append(f"Dozent: {e['lecturer']}")
-        if e["room"]:
-            desc.append(f"Raum: {e['room']}")
+        if e["lecturer"]: desc.append(f"Dozent: {e['lecturer']}")
+        if e["room"]: desc.append(f"Raum: {e['room']}")
         ev.description = "\n".join(desc) if desc else ""
         ev.location = e["room"] or ""
         cal.events.add(ev)
