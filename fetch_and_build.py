@@ -38,35 +38,53 @@ def login_and_download_xlsx():
         )
         page = context.new_page()
 
-        # 1) Login (HTTP Basic) + zu Semesterplänen
+        # 1) Start + Login (HTTP Basic) + Index
         page.goto(CIS_LOGIN_URL, wait_until="domcontentloaded")
-        page.goto(SEMESTERPLAENE_URL, wait_until="domcontentloaded")
-
-        # 2) Versuche explizit den Studienplan-Link zu öffnen (1. Semester Mil-IKTFü)
-        #    Falls die Seite die Links anders benennt, gern den Regex unten anpassen.
+        # Falls es einen "Login"-Button gibt (Landing-Page), klicke ihn:
         try:
-            page.get_by_role("link", name=re.compile(r"1\.\s*Semester.*IKTF", re.I)).click(timeout=3000)
-            page.wait_for_load_state("domcontentloaded")
+            page.get_by_role("button", name=re.compile(r"login", re.I)).click(timeout=2000)
         except Exception:
-            # Falls der Link anders heißt, ist das nicht kritisch – wir suchen direkt nach Excel.
             pass
 
-        # 3) XLSX/XLS/Excel-Link finden (robust, mehrere Varianten)
+        page.goto(SEMESTERPLAENE_URL, wait_until="domcontentloaded")
+
+        # 2) Optional: zuerst auf "Semesterpläne" / Studiengang klicken
+        # (einige CIS-Seiten zeigen erst danach die Downloads)
+        for pattern in [r"Semesterpl[aä]ne", r"1\.\s*Semester.*IKTF", r"Mil-IKTF"]:
+            try:
+                page.get_by_role("link", name=re.compile(pattern, re.I)).click(timeout=2000)
+                page.wait_for_load_state("domcontentloaded")
+            except Exception:
+                pass
+
+        # 3) DEBUG: Alle Links ausgeben, damit wir den richtigen Text/Selektor sehen
+        links = page.locator("a")
+        count = links.count()
+        print(f"[DEBUG] Gefundene Links: {count}")
+        for i in range(min(count, 200)):  # nicht zu viel loggen
+            try:
+                el = links.nth(i)
+                href = (el.get_attribute("href") or "").strip()
+                txt = (el.inner_text() or "").strip().replace("\n", " ")
+                print(f"[DEBUG] Link {i:03d}: text='{txt}' href='{href}'")
+            except Exception:
+                continue
+
+        # 4) Download-Link suchen (xlsx/xls/“Excel” im Text)
         sel = "a[href$='.xlsx'], a[href$='.xls'], a:has-text('xlsx'), a:has-text('Excel')"
         target = None
         loc = page.locator(sel)
         if loc.count() > 0:
             target = loc.first
         else:
-            # Fallback: alle <a> prüfen und ersten passenden nehmen
-            links = page.locator("a")
-            n = links.count()
-            for i in range(n):
+            # Fallback: in der gelisteten Linkliste suchen
+            for i in range(count):
                 try:
-                    href = (links.nth(i).get_attribute("href") or "").lower()
-                    text = (links.nth(i).inner_text() or "").lower()
-                    if ".xlsx" in href or ".xls" in href or "excel" in text:
-                        target = links.nth(i)
+                    el = links.nth(i)
+                    href = (el.get_attribute("href") or "").lower()
+                    txt = (el.inner_text() or "").lower()
+                    if ".xlsx" in href or ".xls" in href or "excel" in txt:
+                        target = el
                         break
                 except Exception:
                     continue
@@ -74,11 +92,15 @@ def login_and_download_xlsx():
         if not target:
             raise RuntimeError("Kein Excel-Link (.xlsx/.xls) gefunden. Bitte Selektor im Script anpassen.")
 
-        # 4) Download auslösen und speichern
+        # 5) Download auslösen
         with page.expect_download() as dl:
             target.click()
         download = dl.value
-        download.save
+        download.save_as(str(DOWNLOAD_XLSX_TO))
+
+        context.close()
+        browser.close()
+
 
 def list_kw_sheets(xls: pd.ExcelFile):
     # Blätter, die wie Kalenderwochen aussehen (z.B. '41','01',...)
