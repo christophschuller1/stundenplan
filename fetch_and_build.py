@@ -56,26 +56,80 @@ def login_and_download_xlsx():
             except Exception:
                 pass
 
-        # 3) Im Bereich "Semesterpläne Archiv" die beiden Dropdowns setzen:
-        #    a) Studiengang: auf *Mil-IKTFü* (robust: alles mit "IKT" / "IKTF")
-        #    b) Studiensemester: "1"
-        #    Dann den Button "Semesterplan laden" klicken.
-        #    (Wir wählen die SELECTs über ihre Platzhalter-Optionen.)
+       # 3) Im Bereich "Semesterpläne Archiv" die beiden Dropdowns setzen,
+#    aber Optionstexte per Regex finden und dann per value auswählen (kein Regex in select_option!)
+try:
+    ctx = page  # falls du später ein Frame nutzt, hier ctx = target_fr setzen
+
+    # Studiengang-Select finden
+    prog_sel = None
+    for selcss in [
+        "select:has(option:has-text('Studiengang auswählen'))",
+        "select[name*='studiengang']",
+        "select"
+    ]:
+        loc = ctx.locator(selcss)
+        if loc.count() > 0:
+            prog_sel = loc.first
+            break
+
+    # Semester-Select finden
+    sem_sel = None
+    for selcss in [
+        "select:has(option:has-text('Studiensemester auswählen'))",
+        "select[name*='semester']",
+        "select"
+    ]:
+        loc = ctx.locator(selcss)
+        if loc.count() > 0:
+            # wenn mehrere Selects gefunden werden, nimm das zweite als Semester
+            sem_sel = loc.nth(1) if (prog_sel and loc.count() > 1) else loc.first
+            break
+
+    import re as _re
+
+    def select_by_text(select_loc, pattern):
+        """Suche Option per Text (Regex) und wähle dann per value aus."""
+        if not select_loc:
+            return False
+        opts = select_loc.locator("option")
+        n = opts.count()
+        for i in range(n):
+            txt = (opts.nth(i).inner_text() or "").strip()
+            if _re.search(pattern, txt, _re.I):
+                val = opts.nth(i).get_attribute("value") or ""
+                if val:
+                    select_loc.select_option(value=val)
+                    return True
+        return False
+
+    ok_prog = select_by_text(prog_sel, r"(IKTF|IKT|Mil-IKTF)")
+    ok_sem  = select_by_text(sem_sel,  r"^\s*1\s*$")
+
+    # Button "Semesterplan laden" klicken (mehrere Varianten ausprobieren)
+    clicked_btn = False
+    for sel in [
+        "button:has-text('Semesterplan laden')",
+        "input[type='submit'][value*='Semesterplan']",
+        "input[value*='Semesterplan']",
+        "button:has-text('laden')"
+    ]:
         try:
-            prog_sel = page.locator("select:has(option:has-text('Studiengang auswählen'))").first
-            sem_sel  = page.locator("select:has(option:has-text('Studiensemester auswählen'))").first
+            ctx.locator(sel).first.click(timeout=3000)
+            clicked_btn = True
+            break
+        except Exception:
+            continue
 
-            # Studiengang wählen (Label-Match: IKT / IKTF / Mil)
-            prog_sel.select_option(label=re.compile(r"(IKTF|IKT|Mil-IKTF)", re.I))
-            # Semester 1
-            sem_sel.select_option(label=re.compile(r"^\s*1\s*$"))
+    if not clicked_btn:
+        print("[DEBUG] Konnte Button 'Semesterplan laden' nicht klicken – fahre fort.")
 
-            # Button "Semesterplan laden" klicken
-            page.get_by_role("button", name=re.compile(r"Semesterplan\s+laden", re.I)).click(timeout=4000)
-            page.wait_for_load_state("domcontentloaded")
-            time.sleep(1)  # kurze Wartezeit, falls Tabelle asynchron rendert
-        except Exception as e:
-            print(f"[DEBUG] Auswahl Semesterpläne Archiv fehlgeschlagen: {e}")
+    page.wait_for_load_state("domcontentloaded")
+    time.sleep(1)  # kurze Wartezeit, falls Tabelle asynchron rendert
+
+except Exception as e:
+    print(f"[DEBUG] Auswahl Semesterpläne Archiv fehlgeschlagen: {e}")
+
 
         # 4) DEBUG: Links/Buttons listen
         links = page.locator("a"); print(f"[DEBUG] Links nach Archiv-Laden: {links.count()}")
