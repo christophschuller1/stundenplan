@@ -38,61 +38,80 @@ def login_and_download_xlsx():
         )
         page = context.new_page()
 
-        # 1) Start + Login (HTTP Basic) + Index
+        # 1) Start + Login (HTTP Basic)
         page.goto(CIS_LOGIN_URL, wait_until="domcontentloaded")
-        # Falls es einen "Login"-Button gibt (Landing-Page), klicke ihn:
+        page.goto(SEMESTERPLAENE_URL, wait_until="domcontentloaded")
+
+        # 2) Falls es einen "Login"-Button gibt (Landing-Page), klicken
         try:
             page.get_by_role("button", name=re.compile(r"login", re.I)).click(timeout=2000)
         except Exception:
             pass
 
-        page.goto(SEMESTERPLAENE_URL, wait_until="domcontentloaded")
+        # 3) Auf "LV-Plan" klicken (laut deinem Log vorhanden)
+        try:
+            page.get_by_role("link", name=re.compile(r"LV[- ]?Plan", re.I)).click(timeout=4000)
+            page.wait_for_load_state("domcontentloaded")
+        except Exception:
+            pass
 
-        # 2) Optional: zuerst auf "Semesterpläne" / Studiengang klicken
-        # (einige CIS-Seiten zeigen erst danach die Downloads)
-        for pattern in [r"Semesterpl[aä]ne", r"1\.\s*Semester.*IKTF", r"Mil-IKTF"]:
-            try:
-                page.get_by_role("link", name=re.compile(pattern, re.I)).click(timeout=2000)
-                page.wait_for_load_state("domcontentloaded")
-            except Exception:
-                pass
-
-        # 3) DEBUG: Alle Links ausgeben, damit wir den richtigen Text/Selektor sehen
+        # 4) DEBUG: Links/Buttons dieser Seite ausgeben
         links = page.locator("a")
-        count = links.count()
-        print(f"[DEBUG] Gefundene Links: {count}")
-        for i in range(min(count, 200)):  # nicht zu viel loggen
+        print(f"[DEBUG] Links nach LV-Plan: {links.count()}")
+        for i in range(min(200, links.count())):
             try:
                 el = links.nth(i)
                 href = (el.get_attribute("href") or "").strip()
-                txt = (el.inner_text() or "").strip().replace("\n", " ")
-                print(f"[DEBUG] Link {i:03d}: text='{txt}' href='{href}'")
+                txt = (el.inner_text() or "").strip().replace("\n"," ")
+                print(f"[DEBUG] A {i:03d}: text='{txt}' href='{href}'")
             except Exception:
-                continue
+                pass
 
-        # 4) Download-Link suchen (xlsx/xls/“Excel” im Text)
-        sel = "a[href$='.xlsx'], a[href$='.xls'], a:has-text('xlsx'), a:has-text('Excel')"
+        buttons = page.locator("button, input[type='button'], input[type='submit']")
+        print(f"[DEBUG] Buttons: {buttons.count()}")
+        for i in range(min(200, buttons.count())):
+            try:
+                el = buttons.nth(i)
+                txt = (el.inner_text() or el.get_attribute("value") or "").strip()
+                print(f"[DEBUG] BTN {i:03d}: text='{txt}'")
+            except Exception:
+                pass
+
+        # 5) Excel/Export-Link oder -Button suchen (mehrere Varianten)
+        selectors = [
+            "a[href$='.xlsx']",
+            "a[href*='excel']",
+            "a:has-text('Excel')",
+            "a:has-text('XLSX')",
+            "button:has-text('Excel')",
+            "button:has-text('Export')",
+            "input[value*='Excel']",
+            "input[value*='Export']",
+        ]
+
         target = None
-        loc = page.locator(sel)
-        if loc.count() > 0:
-            target = loc.first
-        else:
-            # Fallback: in der gelisteten Linkliste suchen
-            for i in range(count):
-                try:
-                    el = links.nth(i)
-                    href = (el.get_attribute("href") or "").lower()
-                    txt = (el.inner_text() or "").lower()
-                    if ".xlsx" in href or ".xls" in href or "excel" in txt:
-                        target = el
-                        break
-                except Exception:
-                    continue
+        for sel in selectors:
+            loc = page.locator(sel)
+            if loc.count() > 0:
+                target = loc.first
+                print(f"[DEBUG] Treffer über Selektor: {sel}")
+                break
+
+        # Fallback: Textsuche in allen Links
+        if not target:
+            for i in range(links.count()):
+                el = links.nth(i)
+                href = (el.get_attribute("href") or "").lower()
+                txt = (el.inner_text() or "").lower()
+                if ".xlsx" in href or ".xls" in href or "excel" in txt or "export" in txt:
+                    target = el
+                    print(f"[DEBUG] Fallback-Link gewählt: text='{txt}' href='{href}'")
+                    break
 
         if not target:
-            raise RuntimeError("Kein Excel-Link (.xlsx/.xls) gefunden. Bitte Selektor im Script anpassen.")
+            raise RuntimeError("Kein Excel/Export-Link oder -Button gefunden. Bitte Selektor anpassen.")
 
-        # 5) Download auslösen
+        # 6) Download starten
         with page.expect_download() as dl:
             target.click()
         download = dl.value
